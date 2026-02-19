@@ -33,8 +33,9 @@ function useLS(key, def) {
   return [v, setV];
 }
 
+// ── ONLY CHANGE: calls /api/notion instead of Anthropic directly ──
 async function notionCall(prompt) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetch("/api/notion", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -51,7 +52,6 @@ async function fetchProgramsFromNotion() {
   const data = await notionCall(
     `Query all pages from Notion data source "${PROGS_DS}". For each page return: page URL, Name, Description, Schedule Type, Active (true/false), and Days JSON. Return ONLY a raw JSON array like: [{"notionUrl":"...","name":"...","description":"...","scheduleType":"...","active":true,"daysJson":"..."}]. No markdown, no explanation, just the JSON array.`
   );
-  // Find text block with JSON
   const textBlocks = (data.content || []).filter(b => b.type === "text");
   for (const block of textBlocks) {
     const text = block.text || "";
@@ -278,7 +278,6 @@ function App() {
   const todayDOW = new Date().getDay();
   const todayStr = new Date().toISOString().slice(0,10);
 
-  // ── SYNC PROGRAMS FROM NOTION ON LOAD ──────────────────────────
   const syncFromNotion = async (silent=false) => {
     setSyncing(true);
     if (!silent) showToast("🔄 Syncing from Notion...", "#4D96FF");
@@ -297,7 +296,6 @@ function App() {
     setSyncing(false);
   };
 
-  // Auto-sync on first load if no programs or last sync was >1 hour ago
   useEffect(() => {
     const shouldSync = programs.length === 0 || !lastSynced || (Date.now() - new Date(lastSynced).getTime()) > 3600000;
     if (shouldSync) syncFromNotion(programs.length > 0);
@@ -362,7 +360,6 @@ function App() {
 
   return (
     <div style={{minHeight:"100vh",paddingBottom:90}}>
-      {/* Header */}
       <div style={{background:"white",boxShadow:"0 2px 15px rgba(0,0,0,0.07)",padding:"14px 18px",position:"sticky",top:0,zIndex:100}}>
         <div style={{maxWidth:620,margin:"0 auto",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <div>
@@ -380,7 +377,6 @@ function App() {
       {toast && <div style={{position:"fixed",bottom:90,left:"50%",transform:"translateX(-50%)",background:toast.color,color:"white",padding:"10px 22px",borderRadius:25,fontWeight:700,fontSize:14,zIndex:500,boxShadow:"0 4px 20px rgba(0,0,0,0.2)",whiteSpace:"nowrap"}}>{toast.msg}</div>}
 
       <div style={{maxWidth:620,margin:"0 auto",padding:"16px 14px"}}>
-        {/* Tabs */}
         <div style={{display:"flex",gap:3,marginBottom:16,background:"white",borderRadius:20,padding:4,boxShadow:"0 2px 10px rgba(0,0,0,0.07)",overflowX:"auto"}}>
           {TABS.map((t,i)=>(
             <button key={i} onClick={()=>setTab(i)} style={{flex:1,minWidth:52,padding:"7px 3px",borderRadius:15,border:"none",background:tab===i?"linear-gradient(90deg,#FF6B6B,#4D96FF)":"transparent",color:tab===i?"white":"#777",fontWeight:700,cursor:"pointer",fontSize:11,whiteSpace:"nowrap"}}>
@@ -389,7 +385,6 @@ function App() {
           ))}
         </div>
 
-        {/* TODAY */}
         {tab===0&&(
           <div>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
@@ -449,7 +444,6 @@ function App() {
           </div>
         )}
 
-        {/* LOG */}
         {tab===1&&(
           <div>
             {!session.type?(
@@ -538,7 +532,6 @@ function App() {
           </div>
         )}
 
-        {/* PROGRAMS */}
         {tab===2&&(
           <div>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
@@ -582,7 +575,6 @@ function App() {
           </div>
         )}
 
-        {/* HISTORY */}
         {tab===3&&(
           <div>
             <h2 style={{color:"#333",marginTop:0}}>📅 History</h2>
@@ -610,7 +602,6 @@ function App() {
           </div>
         )}
 
-        {/* EXERCISES */}
         {tab===4&&(
           <div>
             <h2 style={{color:"#333",marginTop:0}}>🏷️ My Exercises</h2>
@@ -641,7 +632,6 @@ function App() {
           </div>
         )}
 
-        {/* PROGRESS */}
         {tab===5&&(
           <div>
             <h2 style={{color:"#333",marginTop:0}}>📈 Progress</h2>
