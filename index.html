@@ -39,12 +39,39 @@ async function notionCall(prompt) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "claude-sonnet-4-20250514",
-      max_tokens: 1000,
+      max_tokens: 2000,
       mcp_servers: [{ type: "url", url: "https://mcp.notion.com/mcp", name: "notion" }],
       messages: [{ role: "user", content: prompt }]
     })
   });
   return await res.json();
+}
+
+async function fetchProgramsFromNotion() {
+  const data = await notionCall(
+    `Query all pages from Notion data source "${PROGS_DS}". For each page return: page URL, Name, Description, Schedule Type, Active (true/false), and Days JSON. Return ONLY a raw JSON array like: [{"notionUrl":"...","name":"...","description":"...","scheduleType":"...","active":true,"daysJson":"..."}]. No markdown, no explanation, just the JSON array.`
+  );
+  // Find text block with JSON
+  const textBlocks = (data.content || []).filter(b => b.type === "text");
+  for (const block of textBlocks) {
+    const text = block.text || "";
+    const match = text.match(/\[[\s\S]*\]/);
+    if (match) {
+      try {
+        const rows = JSON.parse(match[0]);
+        return rows.map((r, i) => ({
+          id: Date.now() + i,
+          notionUrl: r.notionUrl || "",
+          name: r.name || "Untitled Program",
+          description: r.description || "",
+          scheduleType: r.scheduleType || "Both",
+          active: r.active === true || r.active === "true" || r.active === "__YES__",
+          days: (() => { try { return JSON.parse(r.daysJson || "[]"); } catch { return []; } })()
+        }));
+      } catch { continue; }
+    }
+  }
+  return [];
 }
 
 async function saveLogToNotion(log) {
@@ -58,7 +85,11 @@ async function saveProgramToNotion(prog) {
   await notionCall(`Create a new page in Notion data source "${PROGS_DS}" with: Name="${prog.name}", Description="${prog.description||""}", Schedule Type="${prog.scheduleType}", Active=${prog.active?"__YES__":"__NO__"}, Days JSON="${JSON.stringify(prog.days).replace(/"/g,'\\"')}". Confirm with SAVED.`);
 }
 
-// ── TIMER ────────────────────────────────────────────────────────
+async function updateProgramInNotion(notionUrl, prog) {
+  await notionCall(`Update Notion page at URL "${notionUrl}": set Active=${prog.active?"__YES__":"__NO__"}, Days JSON="${JSON.stringify(prog.days).replace(/"/g,'\\"')}". Confirm with UPDATED.`);
+}
+
+// ── TIMER ─────────────────────────────────────────────────────────
 function Timer({ label, onClose }) {
   const [secs, setSecs] = useState(0);
   const [running, setRunning] = useState(false);
@@ -104,7 +135,7 @@ function Timer({ label, onClose }) {
   );
 }
 
-// ── PROGRAM EDITOR ───────────────────────────────────────────────
+// ── PROGRAM EDITOR ────────────────────────────────────────────────
 function ProgramEditor({ prog, exercises, onSave, onCancel, saving }) {
   const [p, setP] = useState(prog || { name:"", description:"", scheduleType:"Both", active:false, days:[] });
   const [newDayName, setNewDayName] = useState("");
@@ -140,7 +171,6 @@ function ProgramEditor({ prog, exercises, onSave, onCancel, saving }) {
           ))}
         </div>
       </div>
-
       {p.days.length > 0 && (
         <div style={{marginBottom:14}}>
           <label style={{fontWeight:700,color:"#555",fontSize:13,display:"block",marginBottom:8}}>Workout Days</label>
@@ -174,7 +204,6 @@ function ProgramEditor({ prog, exercises, onSave, onCancel, saving }) {
           ))}
         </div>
       )}
-
       <div style={{background:"#f0f4ff",borderRadius:14,padding:14,marginBottom:14}}>
         <p style={{fontWeight:700,color:"#4D96FF",margin:"0 0 10px",fontSize:13}}>+ Add Workout Day</p>
         <input placeholder="Day name (e.g. Push Day, Leg Day)" value={newDayName} onChange={e=>setNewDayName(e.target.value)} style={{width:"100%",padding:"8px 12px",borderRadius:10,border:"2px solid #dde5ff",fontSize:13,marginBottom:8}}/>
@@ -199,7 +228,6 @@ function ProgramEditor({ prog, exercises, onSave, onCancel, saving }) {
         )}
         <button onClick={addDay} style={{width:"100%",padding:8,borderRadius:12,border:"none",background:"#4D96FF",color:"white",fontWeight:700,cursor:"pointer",fontSize:13}}>Add Day</button>
       </div>
-
       <div style={{display:"flex",gap:10}}>
         <button onClick={onCancel} style={{flex:1,padding:12,borderRadius:15,border:"2px solid #e0e0e0",background:"white",color:"#777",fontWeight:700,cursor:"pointer"}}>Cancel</button>
         <button onClick={()=>onSave(p)} disabled={!p.name||saving} style={{flex:2,padding:12,borderRadius:15,border:"none",background:"linear-gradient(90deg,#6BCB77,#4D96FF)",color:"white",fontWeight:800,cursor:"pointer",opacity:(!p.name||saving)?0.6:1}}>
@@ -210,7 +238,7 @@ function ProgramEditor({ prog, exercises, onSave, onCancel, saving }) {
   );
 }
 
-// ── MAIN APP ─────────────────────────────────────────────────────
+// ── MAIN APP ──────────────────────────────────────────────────────
 const TABS = ["Today","Log","Programs","History","Exercises","Progress"];
 const DEFAULT_EXERCISES = [
   {id:1,name:"Squat",type:"strength",color:"#FF6B6B"},
@@ -235,11 +263,13 @@ function App() {
   const [progEx, setProgEx] = useState(null);
   const [newExName, setNewExName] = useState("");
   const [newExType, setNewExType] = useState("strength");
+  const [syncing, setSyncing] = useState(false);
+  const [lastSynced, setLastSynced] = useLS("gt_last_synced", null);
 
   const blankSession = () => ({ type:null, date:new Date().toISOString().slice(0,10), exercises:[], cardio:{exercise:"",duration:"",distance:"",notes:""}, programName:"", programDay:"" });
   const [session, setSession] = useState(blankSession);
 
-  const showToast = (msg, color="#6BCB77") => { setToast({msg,color}); setTimeout(()=>setToast(null),3000); };
+  const showToast = (msg, color="#6BCB77") => { setToast({msg,color}); setTimeout(()=>setToast(null),3500); };
   const strengthEx = exercises.filter(e=>e.type==="strength");
   const cardioEx   = exercises.filter(e=>e.type==="cardio");
 
@@ -247,6 +277,31 @@ function App() {
   const currentWeek = `${new Date().getFullYear()}-W${String(weekNum()).padStart(2,"0")}`;
   const todayDOW = new Date().getDay();
   const todayStr = new Date().toISOString().slice(0,10);
+
+  // ── SYNC PROGRAMS FROM NOTION ON LOAD ──────────────────────────
+  const syncFromNotion = async (silent=false) => {
+    setSyncing(true);
+    if (!silent) showToast("🔄 Syncing from Notion...", "#4D96FF");
+    try {
+      const fetched = await fetchProgramsFromNotion();
+      if (fetched.length > 0) {
+        setPrograms(fetched);
+        setLastSynced(new Date().toISOString());
+        if (!silent) showToast(`✅ Synced ${fetched.length} program${fetched.length>1?"s":""}!`);
+      } else {
+        if (!silent) showToast("ℹ️ No programs found in Notion", "#FFD93D");
+      }
+    } catch {
+      if (!silent) showToast("⚠️ Sync failed — using local data", "#FF6B6B");
+    }
+    setSyncing(false);
+  };
+
+  // Auto-sync on first load if no programs or last sync was >1 hour ago
+  useEffect(() => {
+    const shouldSync = programs.length === 0 || !lastSynced || (Date.now() - new Date(lastSynced).getTime()) > 3600000;
+    if (shouldSync) syncFromNotion(programs.length > 0);
+  }, []);
 
   const activeProgram = programs.find(p=>p.active);
   const todayPlan = activeProgram?.days?.find(d=>d.dowDays?.includes(todayDOW)) || null;
@@ -282,7 +337,7 @@ function App() {
     setSaving(true);
     if (prog.id) {
       setPrograms(prev=>prev.map(p=>p.id===prog.id?prog:p));
-      showToast("✅ Program updated!");
+      try { if (prog.notionUrl) await updateProgramInNotion(prog.notionUrl, prog); showToast("✅ Program updated!"); } catch { showToast("Saved locally","#FFD93D"); }
     } else {
       const np = {...prog, id:Date.now()};
       setPrograms(prev=>[...prev,np]);
@@ -300,9 +355,8 @@ function App() {
 
   const addExercise = () => { if(!newExName.trim())return; setExercises(prev=>[...prev,{id:Date.now(),name:newExName.trim(),type:newExType,color:COLORS[prev.length%COLORS.length]}]); setNewExName(""); };
 
-  const s = { // shared styles
+  const cs = {
     card: {background:"white",borderRadius:16,padding:16,marginBottom:12,boxShadow:"0 2px 10px rgba(0,0,0,0.06)"},
-    btn: (bg,color="#white")=>({border:"none",borderRadius:30,padding:"8px 18px",background:bg,color,fontWeight:700,cursor:"pointer",fontSize:14}),
     tag: (color)=>({padding:"5px 12px",borderRadius:18,border:`2px solid ${color}`,fontWeight:700,cursor:"pointer",fontSize:13}),
   };
 
@@ -313,9 +367,12 @@ function App() {
         <div style={{maxWidth:620,margin:"0 auto",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <div>
             <h1 style={{margin:0,fontSize:21,fontWeight:800,background:"linear-gradient(90deg,#FF6B6B,#4D96FF)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>💪 GainTracker</h1>
-            <p style={{margin:0,fontSize:11,color:"#aaa"}}>Synced to Notion</p>
+            <p style={{margin:0,fontSize:11,color:"#aaa"}}>{syncing?"🔄 Syncing...":lastSynced?`Synced ${new Date(lastSynced).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}`:"Notion sync"}</p>
           </div>
-          <button onClick={()=>setTimer(timer?null:"General")} style={{background:timer?"#FFD93D":"#f0f0f0",border:"none",borderRadius:20,padding:"7px 13px",fontWeight:700,cursor:"pointer",fontSize:13}}>⏱ Timer</button>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>syncFromNotion(false)} disabled={syncing} style={{background:"#f0f4ff",border:"none",borderRadius:20,padding:"7px 12px",fontWeight:700,cursor:"pointer",fontSize:12,color:"#4D96FF",opacity:syncing?0.5:1}}>↻ Sync</button>
+            <button onClick={()=>setTimer(timer?null:"General")} style={{background:timer?"#FFD93D":"#f0f0f0",border:"none",borderRadius:20,padding:"7px 13px",fontWeight:700,cursor:"pointer",fontSize:13}}>⏱</button>
+          </div>
         </div>
       </div>
 
@@ -343,7 +400,7 @@ function App() {
               {activeProgram&&<div style={{background:"#f0f4ff",borderRadius:12,padding:"5px 11px",fontSize:12,fontWeight:700,color:"#4D96FF"}}>{activeProgram.name}</div>}
             </div>
             {activeProgram&&(
-              <div style={s.card}>
+              <div style={cs.card}>
                 <p style={{margin:"0 0 10px",fontWeight:700,color:"#555",fontSize:13}}>This week</p>
                 <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
                   {(activeProgram.days||[]).map(day=>(
@@ -359,7 +416,7 @@ function App() {
               </div>
             )}
             {todayPlan ? (
-              <div style={{...s.card,border:"2px solid #4D96FF",boxShadow:"0 4px 20px rgba(77,150,255,0.15)"}}>
+              <div style={{...cs.card,border:"2px solid #4D96FF",boxShadow:"0 4px 20px rgba(77,150,255,0.15)"}}>
                 <p style={{margin:"0 0 5px",fontWeight:800,color:"#4D96FF",fontSize:15}}>📋 Today: {todayPlan.name}</p>
                 <p style={{margin:"0 0 10px",color:"#888",fontSize:13}}>{todayPlan.type==="strength"?"🏋️ Strength":"🏃 Cardio"} · {todayPlan.exercises?.length||0} exercises</p>
                 {todayPlan.exercises?.length>0&&(
@@ -370,8 +427,8 @@ function App() {
                 <button onClick={()=>startFromPlan(todayPlan)} style={{width:"100%",padding:12,borderRadius:15,border:"none",background:"linear-gradient(90deg,#4D96FF,#C77DFF)",color:"white",fontWeight:800,fontSize:15,cursor:"pointer"}}>▶ Start Today's Workout</button>
               </div>
             ) : (
-              <div style={{...s.card,textAlign:"center"}}>
-                <p style={{color:"#aaa",marginBottom:12}}>{activeProgram?"Rest day or no workout scheduled 🎉":"No active program — set one up in Programs!"}</p>
+              <div style={{...cs.card,textAlign:"center"}}>
+                <p style={{color:"#aaa",marginBottom:12}}>{activeProgram?"Rest day 🎉 or no workout scheduled":"No active program — set one up in Programs!"}</p>
                 <button onClick={()=>setTab(1)} style={{padding:"10px 22px",borderRadius:15,border:"none",background:"linear-gradient(90deg,#FF6B6B,#FFD93D)",color:"white",fontWeight:700,cursor:"pointer"}}>+ Log a Workout Anyway</button>
               </div>
             )}
@@ -379,7 +436,7 @@ function App() {
               <div>
                 <p style={{fontWeight:700,color:"#555",fontSize:13,marginBottom:8}}>Recent:</p>
                 {logs.slice(0,3).map(log=>(
-                  <div key={log.id} style={{...s.card,padding:12,display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                  <div key={log.id} style={{...cs.card,padding:12,display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
                     <div>
                       <span style={{fontWeight:700,color:log.type==="strength"?"#FF6B6B":"#4D96FF",fontSize:14}}>{log.type==="strength"?"🏋️ Strength":"🏃 Cardio"}</span>
                       {log.programDay&&<span style={{marginLeft:8,fontSize:11,color:"#aaa"}}>{log.programDay}</span>}
@@ -417,14 +474,14 @@ function App() {
                   <button onClick={()=>setSession(blankSession())} style={{background:"#f0f0f0",border:"none",borderRadius:12,padding:"6px 12px",cursor:"pointer",color:"#777",fontWeight:600,fontSize:12}}>↩ Back</button>
                 </div>
                 {session.programDay&&<div style={{background:"#f0f4ff",borderRadius:12,padding:"7px 13px",marginBottom:10,fontSize:13,fontWeight:600,color:"#4D96FF"}}>📋 {session.programDay}</div>}
-                <div style={{...s.card,padding:12,marginBottom:10}}>
+                <div style={{...cs.card,padding:12,marginBottom:10}}>
                   <p style={{margin:"0 0 8px",fontWeight:700,color:"#555",fontSize:12}}>Add exercises:</p>
                   <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                    {strengthEx.map(ex=>{ const added=!!session.exercises.find(e=>e.id===ex.id); return <button key={ex.id} onClick={()=>addExToSession(ex)} style={{...s.tag(ex.color),background:added?ex.color:"white",color:added?"white":ex.color,padding:"4px 11px",fontSize:12}}>{added?"✓ ":""}{ex.name}</button>; })}
+                    {strengthEx.map(ex=>{ const added=!!session.exercises.find(e=>e.id===ex.id); return <button key={ex.id} onClick={()=>addExToSession(ex)} style={{...cs.tag(ex.color),background:added?ex.color:"white",color:added?"white":ex.color,padding:"4px 11px",fontSize:12}}>{added?"✓ ":""}{ex.name}</button>; })}
                   </div>
                 </div>
                 {session.exercises.map((ex,ei)=>(
-                  <div key={ex.id} style={{...s.card,borderLeft:`4px solid ${ex.color}`,padding:14}}>
+                  <div key={ex.id} style={{...cs.card,borderLeft:`4px solid ${ex.color}`,padding:14}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
                       <span style={{fontWeight:800,color:ex.color,fontSize:14}}>{ex.name}</span>
                       <div style={{display:"flex",gap:5}}>
@@ -458,11 +515,11 @@ function App() {
                   <button onClick={()=>setSession(blankSession())} style={{background:"#f0f0f0",border:"none",borderRadius:12,padding:"6px 12px",cursor:"pointer",color:"#777",fontWeight:600,fontSize:12}}>↩ Back</button>
                 </div>
                 {session.programDay&&<div style={{background:"#f0f4ff",borderRadius:12,padding:"7px 13px",marginBottom:10,fontSize:13,fontWeight:600,color:"#4D96FF"}}>📋 {session.programDay}</div>}
-                <div style={s.card}>
+                <div style={cs.card}>
                   <div style={{marginBottom:12}}>
                     <label style={{fontWeight:700,color:"#555",fontSize:13,display:"block",marginBottom:6}}>Activity</label>
                     <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                      {cardioEx.map(ex=><button key={ex.id} onClick={()=>setSession(ss=>({...ss,cardio:{...ss.cardio,exercise:ex.name}}))} style={{...s.tag(ex.color),background:session.cardio.exercise===ex.name?ex.color:"white",color:session.cardio.exercise===ex.name?"white":ex.color}}>{ex.name}</button>)}
+                      {cardioEx.map(ex=><button key={ex.id} onClick={()=>setSession(ss=>({...ss,cardio:{...ss.cardio,exercise:ex.name}}))} style={{...cs.tag(ex.color),background:session.cardio.exercise===ex.name?ex.color:"white",color:session.cardio.exercise===ex.name?"white":ex.color}}>{ex.name}</button>)}
                     </div>
                   </div>
                   {[["Duration (min)","duration","e.g. 30"],["Distance (mi/km)","distance","e.g. 3.1"],["Notes","notes","How did it feel?"]].map(([lbl,field,ph])=>(
@@ -486,14 +543,21 @@ function App() {
           <div>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
               <h2 style={{margin:0,color:"#333"}}>📅 Programs</h2>
-              {!editProg&&<button onClick={()=>setEditProg({})} style={{padding:"8px 16px",borderRadius:15,border:"none",background:"linear-gradient(90deg,#C77DFF,#4D96FF)",color:"white",fontWeight:700,cursor:"pointer",fontSize:13}}>+ New</button>}
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={()=>syncFromNotion(false)} disabled={syncing} style={{padding:"7px 12px",borderRadius:15,border:"none",background:"#f0f4ff",color:"#4D96FF",fontWeight:700,cursor:"pointer",fontSize:12,opacity:syncing?0.5:1}}>↻ Sync</button>
+                {!editProg&&<button onClick={()=>setEditProg({})} style={{padding:"8px 16px",borderRadius:15,border:"none",background:"linear-gradient(90deg,#C77DFF,#4D96FF)",color:"white",fontWeight:700,cursor:"pointer",fontSize:13}}>+ New</button>}
+              </div>
             </div>
             {editProg!==null?(
               <ProgramEditor prog={editProg.id?editProg:null} exercises={exercises} onSave={saveProgram} onCancel={()=>setEditProg(null)} saving={saving}/>
             ):programs.length===0?(
-              <div style={{textAlign:"center",padding:40,color:"#aaa"}}><div style={{fontSize:48,marginBottom:10}}>📋</div><p>No programs yet! Build your first workout plan.</p></div>
+              <div style={{textAlign:"center",padding:40,color:"#aaa"}}>
+                <div style={{fontSize:48,marginBottom:10}}>📋</div>
+                <p>No programs yet!</p>
+                <button onClick={()=>syncFromNotion(false)} style={{padding:"10px 22px",borderRadius:15,border:"none",background:"linear-gradient(90deg,#4D96FF,#C77DFF)",color:"white",fontWeight:700,cursor:"pointer",marginTop:8}}>↻ Sync from Notion</button>
+              </div>
             ):programs.map(prog=>(
-              <div key={prog.id} style={{...s.card,border:prog.active?"2px solid #6BCB77":"2px solid transparent"}}>
+              <div key={prog.id} style={{...cs.card,border:prog.active?"2px solid #6BCB77":"2px solid transparent"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
                   <div>
                     <h3 style={{margin:0,color:"#333",fontSize:15}}>{prog.name}</h3>
@@ -524,7 +588,7 @@ function App() {
             <h2 style={{color:"#333",marginTop:0}}>📅 History</h2>
             {logs.length===0?<div style={{textAlign:"center",padding:40,color:"#aaa"}}><div style={{fontSize:48}}>📭</div><p>No workouts yet!</p></div>
             :logs.map(log=>(
-              <div key={log.id} style={s.card}>
+              <div key={log.id} style={cs.card}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
                   <span style={{fontWeight:800,fontSize:14,color:log.type==="strength"?"#FF6B6B":"#4D96FF"}}>{log.type==="strength"?"🏋️ Strength":"🏃 Cardio"}</span>
                   <span style={{color:"#aaa",fontSize:12}}>{log.date}</span>
@@ -550,7 +614,7 @@ function App() {
         {tab===4&&(
           <div>
             <h2 style={{color:"#333",marginTop:0}}>🏷️ My Exercises</h2>
-            <div style={s.card}>
+            <div style={cs.card}>
               <p style={{fontWeight:700,color:"#555",margin:"0 0 10px",fontSize:13}}>Add exercise:</p>
               <div style={{display:"flex",gap:8,marginBottom:8}}>
                 <input placeholder="Name" value={newExName} onChange={e=>setNewExName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addExercise()} style={{flex:1,padding:"9px 12px",borderRadius:10,border:"2px solid #e0e0e0",fontSize:13}}/>
@@ -582,14 +646,14 @@ function App() {
           <div>
             <h2 style={{color:"#333",marginTop:0}}>📈 Progress</h2>
             <div style={{display:"flex",flexWrap:"wrap",gap:7,marginBottom:14}}>
-              {strengthEx.map(ex=><button key={ex.id} onClick={()=>setProgEx(ex)} style={{...s.tag(ex.color),background:progEx?.id===ex.id?ex.color:"white",color:progEx?.id===ex.id?"white":ex.color,padding:"5px 12px",fontSize:12}}>{ex.name}</button>)}
+              {strengthEx.map(ex=><button key={ex.id} onClick={()=>setProgEx(ex)} style={{...cs.tag(ex.color),background:progEx?.id===ex.id?ex.color:"white",color:progEx?.id===ex.id?"white":ex.color,padding:"5px 12px",fontSize:12}}>{ex.name}</button>)}
             </div>
             {progEx&&(()=>{
               const pts=getProgress(progEx.id);
               if(!pts.length) return <div style={{textAlign:"center",padding:30,color:"#aaa"}}>No data yet for {progEx.name}</div>;
               const max=Math.max(...pts.map(p=>p.weight))||1, min=Math.min(...pts.map(p=>p.weight));
               return (
-                <div style={s.card}>
+                <div style={cs.card}>
                   <h3 style={{color:progEx.color,margin:"0 0 14px",fontSize:15}}>{progEx.name} — Top Weight / Session</h3>
                   <div style={{display:"flex",alignItems:"flex-end",gap:4,height:130,marginBottom:6}}>
                     {pts.map((pt,i)=>{ const h=max===min?80:((pt.weight-min)/(max-min))*100+15; return <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3}}><span style={{fontSize:9,color:"#555",fontWeight:700}}>{pt.weight}</span><div style={{width:"100%",height:`${h}%`,background:progEx.color,borderRadius:"5px 5px 0 0",opacity:0.8}}/></div>; })}
